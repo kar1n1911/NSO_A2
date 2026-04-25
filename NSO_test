@@ -1,0 +1,33 @@
+Host bastionNSO
+    HostName 194.47.155.114
+    User ubuntu
+    IdentityFile /Users/coleanderson/.ssh/id_rsa
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host HAproxy
+    HostName 10.0.1.240
+    User ubuntu
+    IdentityFile /Users/coleanderson/.ssh/id_rsa
+    ProxyJump bastionNSO
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host devA
+    HostName 10.0.1.53
+    User ubuntu
+    IdentityFile /Users/coleanderson/.ssh/id_rsa
+    ProxyJump bastionNSO
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host devB
+    HostName 10.0.1.177
+    User ubuntu
+    IdentityFile /Users/coleanderson/.ssh/id_rsa
+    ProxyJump bastionNSO
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+Host HAPROXYOUTERREACH
+    HostName 194.47.155.126

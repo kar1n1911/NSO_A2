@@ -1,0 +1,10 @@
+[HAproxy]
+HAproxy
+
+[webservers]
+devA
+devB
+
+[all:vars]
+ansible_user=ubuntu
+## ssh key handled by external SSH config file ##

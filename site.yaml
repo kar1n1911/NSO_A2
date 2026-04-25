@@ -1,0 +1,235 @@
+---
+- name: Bootstrap Python for Ansible compatibility
+  hosts: HAproxy:webservers
+  become: true
+  gather_facts: false
+  vars:
+    python_promote_as_default: true
+  tasks:
+    - name: Disable broken sitecustomize.py files if present ## This line is testing requirements, but don't know why
+      ansible.builtin.raw: |
+        set -e
+        ts="$(date +%s)"
+        for f in /usr/lib/python3*/sitecustomize.py /usr/lib/python3*/dist-packages/sitecustomize.py /usr/local/lib/python3*/dist-packages/sitecustomize.py /usr/local/lib/python3*/site-packages/sitecustomize.py; do
+          [ -f "$f" ] || continue
+          /usr/bin/python3 -S -m py_compile "$f" >/dev/null 2>&1 || mv "$f" "${f}.disabled_by_ansible_${ts}"
+        done
+      changed_when: false
+
+    - name: Detect current default python3 version
+      ansible.builtin.raw: |
+        set -e
+        if [ -x /usr/bin/python3 ]; then
+          /usr/bin/python3 -S -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")'
+        else
+          echo "0.0"
+        fi
+      register: current_pyver
+      changed_when: false
+      failed_when: false
+
+    - name: Set python upgrade requirement flag
+      ansible.builtin.set_fact:
+        python_upgrade_needed: "{{ (current_pyver.stdout | trim) is version('3.9', '<') }}"
+
+    - name: Install Python 3.9 when current python is below 3.9
+      ansible.builtin.raw: |
+        apt-get update -y
+        apt-get install -y python3.9
+      when: python_upgrade_needed
+
+    - name: Set environment to python 3.9
+      ansible.builtin.raw: ln -sf /usr/bin/python3.9 /usr/bin/python3
+      when: python_upgrade_needed
+
+- name: Deploy Flask app on backend webservers (online mode)
+  hosts: webservers
+  become: true
+  gather_facts: true
+  vars:
+    app_root: /opt/NSO_A2
+    connectivity_test_host: google.com
+    connectivity_test_port: 443
+    ansible_python_interpreter: /usr/bin/python3.9
+    backend_required_packages:
+      - git
+      - python3-flask
+
+  tasks:
+    - name: Install backend packages
+      ansible.builtin.raw: |
+        apt-get update -y
+        apt-get install -y python3-flask git
+
+    - name: Ensure application directory exists
+      ansible.builtin.file:
+        path: "{{ app_root }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Clone or update NSO_A2 repository
+      ansible.builtin.git:
+        repo: https://github.com/patrikarlos/NSO_A2.git
+        dest: "{{ app_root }}"
+        version: main
+        update: true
+      become_user: "{{ ansible_user }}"
+
+    - name: Create systemd service for Flask app
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nso-flask.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=NSO A2 Flask application
+          After=network.target
+
+          [Service]
+          User={{ ansible_user }}
+          Group={{ ansible_user }}
+          WorkingDirectory=/opt/NSO_A2
+          Environment=FLASK_APP=/opt/NSO_A2/application2.py
+          ExecStart={{ ansible_python_interpreter }} -m flask run --host=0.0.0.0 --port=5000
+          Restart=always
+          RestartSec=2
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and restart Flask service
+      ansible.builtin.systemd:
+        name: nso-flask.service
+        enabled: true
+        state: restarted
+
+- name: Deploy and configure HAProxy (online mode)
+  hosts: HAproxy
+  become: true
+  vars:
+    connectivity_test_host: google.com
+    connectivity_test_port: 443
+    ansible_python_interpreter: /usr/bin/python3.9
+    haproxy_required_packages:
+      - haproxy
+  tasks:
+    - name: Verify outbound network connectivity from HAProxy host
+      ansible.builtin.wait_for:
+        host: "{{ connectivity_test_host }}"
+        port: "{{ connectivity_test_port }}"
+        timeout: 6
+      register: haproxy_connectivity_test
+      changed_when: false
+
+    - name: Fail if HAProxy host has no outbound network access
+      ansible.builtin.assert:
+        that:
+          - haproxy_connectivity_test is succeeded
+        fail_msg: "HAProxy host has no outbound network connectivity; online apt installation cannot continue."
+
+    - name: Install / Reinstall HAProxy packages
+      ansible.builtin.raw: |
+        apt-get update -y
+        apt-get install -y haproxy
+
+    - name: Configure HAProxy for webservers
+      ansible.builtin.copy:
+        dest: /etc/haproxy/haproxy.cfg
+        mode: "0644"
+        content: |
+          global
+              log /dev/log local0
+              log /dev/log local1 notice
+              chroot /var/lib/haproxy
+              stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+              stats timeout 30s
+              user haproxy
+              group haproxy
+              daemon
+
+          defaults
+              log global
+              mode http
+              option httplog
+              option dontlognull
+              timeout connect 5s
+              timeout client  30s
+              timeout server  30s
+
+          frontend http_front
+              bind *:80
+              default_backend flask_backends
+
+          backend flask_backends
+              balance roundrobin
+              option httpchk GET /
+          {% for host in groups['webservers'] %}
+              server {{ host }} {{ hostvars[host].ansible_default_ipv4.address | default(hostvars[host].ansible_host | default(host)) }}:5000 check
+          {% endfor %}
+
+    - name: Enable and restart HAProxy
+      ansible.builtin.systemd:
+        name: haproxy
+        enabled: true
+        state: restarted
+
+- name: End-to-end test through HAProxy (external public IP)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ssh_config_file: "{{ playbook_dir }}/NSO_test"
+    haproxy_outer_alias: HAPROXYOUTERREACH
+    backend_hosts: "{{ groups['webservers'] | default([]) }}"
+    test_request_count: "{{ [3, (backend_hosts | length)] | max }}"
+  tasks:
+    - name: Ensure at least one backend exists
+      ansible.builtin.assert:
+        that:
+          - backend_hosts | length > 0
+        fail_msg: "No webservers found in inventory."
+
+    - name: Resolve HAProxy external endpoint from SSH config alias
+      ansible.builtin.shell: |
+        ssh -F "{{ ssh_config_file }}" -G "{{ haproxy_outer_alias }}" 2>/dev/null | awk '/^hostname /{print $2; exit}'
+      args:
+        executable: /bin/bash
+      register: haproxy_target_lookup
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure HAProxy external alias is defined in NSO_test
+      ansible.builtin.assert:
+        that:
+          - haproxy_target_lookup.stdout | trim | length > 0
+        fail_msg: "Define 'Host HAPROXYOUTERREACH' with HostName <public_ip> in NSO_test."
+
+    - name: Send requests to HAProxy public endpoint
+      ansible.builtin.uri:
+        url: "http://{{ haproxy_target_lookup.stdout | trim }}/"
+        method: GET
+        return_content: true
+      loop: "{{ range(0, test_request_count | int) | list }}"
+      register: haproxy_requests
+
+    - name: Show responses
+      ansible.builtin.debug:
+        msg: "{{ item.content | trim }}"
+      loop: "{{ haproxy_requests.results }}"
+
+    - name: Build merged response text
+      ansible.builtin.set_fact:
+        merged_haproxy_response: "{{ haproxy_requests.results | map(attribute='content') | join(' ') | lower }}"
+
+    - name: Assert each backend host answered at least once
+      ansible.builtin.assert:
+        that:
+          - merged_haproxy_response is search(item | lower)
+        fail_msg: "Did not observe response from backend {{ item }}."
+        success_msg: "Observed response from backend {{ item }}."
+      loop: "{{ backend_hosts }}"

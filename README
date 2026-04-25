@@ -1,0 +1,47 @@
+NSO_A2 Ansible Deployment
+=========================
+
+This repository contains:
+- `hosts` inventory required by the assignment
+- `site.yaml` playbook to deploy Flask app + HAProxy and run a basic test
+
+How it works
+------------
+1. Clones/updates `https://github.com/patrikarlos/NSO_A2.git` on `devA`, `devB`, `devC`.
+2. Runs `/opt/NSO_A2/application2.py` (from that repo) as the Flask service.
+3. Configures HAProxy on host `HAproxy` to load-balance across all three backends.
+4. Sends 3 HTTP requests to HAProxy endpoint and verifies all backend hosts answered.
+
+SSH jump host configuration
+---------------------------
+The grader runs Ansible with:
+
+`ansible-playbook --ssh-common-args "-F /home/joedoe/.ssh/include/NSO_$tag" -i hosts site.yaml`
+
+Be noted that joedoe is YOUR username, and NSO_$tag refers to YOUR file contains that.
+
+Your SSH config include file must define jump behavior. Example:
+
+```sshconfig
+Host bastionNSO
+    HostName <BASTION_PUBLIC_IP>
+    User ubuntu
+    IdentityFile ~/.ssh/<your_private_key>
+
+Host HAproxy devA devB devC
+    User ubuntu
+    IdentityFile ~/.ssh/<your_private_key>
+    ProxyJump bastionNSO
+```
+
+Run
+---
+
+```bash
+ansible-playbook --ssh-common-args "-F /home/joedoe/.ssh/include/NSO_$tag" -i hosts site.yaml
+```
+
+Notes
+-----
+- Ubuntu 20.04 compatible.
+- No VM creation is performed; existing hosts are configured in-place.
