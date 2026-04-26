@@ -46,12 +46,11 @@
     app_root: /opt/NSO_A2
     connectivity_test_host: google.com
     connectivity_test_port: 443
-
   tasks:
+
     - name: Install Flask Through pip
       ansible.builtin.pip:
         name: flask
-      become: yes
 
     - name: Install git
       ansible.builtin.raw: |
