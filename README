@@ -14,13 +14,11 @@ How it works
 
 SSH jump host configuration
 ---------------------------
-The grader runs Ansible with:
+runs with:
 
 `ansible-playbook --ssh-common-args "-F /home/joedoe/.ssh/include/NSO_$tag" -i hosts site.yaml`
 
-Be noted that joedoe is YOUR username, and NSO_$tag refers to YOUR file contains that.
-
-Your SSH config include file must define jump behavior. Example:
+The SSH config include file must define jump behavior. Example:
 
 ```sshconfig
 Host bastionNSO
@@ -43,5 +41,4 @@ ansible-playbook --ssh-common-args "-F /home/joedoe/.ssh/include/NSO_$tag" -i ho
 
 Notes
 -----
-- Ubuntu 20.04 compatible.
-- No VM creation is performed; existing hosts are configured in-place.
+- Ubuntu 20.04 compatible.(OPTIMIZED ESPECIALLY!)

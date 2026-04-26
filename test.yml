@@ -174,3 +174,47 @@
         name: haproxy
         enabled: true
         state: restarted
+
+- name: End-to-end test through HAProxy (external public IP)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ssh_config_file: "{{ playbook_dir }}/NSO_test"
+    haproxy_outer_alias: HAPROXYOUTERREACH
+    backend_hosts: "{{ groups['webservers'] | default([]) }}"
+    test_request_count: "{{ [3, (backend_hosts | length)] | max }}"
+  tasks:
+    - name: Ensure at least one backend exists
+      ansible.builtin.assert:
+        that:
+          - backend_hosts | length > 0
+        fail_msg: "No webservers found in inventory."
+
+    - name: Resolve HAProxy external endpoint from SSH config alias
+      ansible.builtin.shell: |
+        ssh -F "{{ ssh_config_file }}" -G "{{ haproxy_outer_alias }}" 2>/dev/null | awk '/^hostname /{print $2; exit}'
+      args:
+        executable: /bin/bash
+      register: haproxy_target_lookup
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure HAProxy external alias is defined in NSO_test
+      ansible.builtin.assert:
+        that:
+          - haproxy_target_lookup.stdout | trim | length > 0
+        fail_msg: "Define 'Host HAPROXYOUTERREACH' with HostName <public_ip> in NSO_test."
+
+    - name: Send requests to HAProxy public endpoint
+      ansible.builtin.uri:
+        url: "http://{{ haproxy_target_lookup.stdout | trim }}/"
+        method: GET
+        return_content: true
+      loop: "{{ range(0, test_request_count | int) | list }}"
+      register: haproxy_requests
+
+    - name: Show responses
+      ansible.builtin.debug:
+        msg: "{{ item.content | trim }}"
+      loop: "{{ haproxy_requests.results }}"
