@@ -1,42 +1,3 @@
----
-- name: Bootstrap Python for Ansible compatibility
-  hosts: HAproxy:webservers
-  become: true
-  gather_facts: false
-  vars:
-    python_promote_as_default: true
-  tasks:
-
-    - name: Detect current default python3 version
-      ansible.builtin.raw: |
-        set -e
-        if [ -x /usr/bin/python3 ]; then
-          /usr/bin/python3 -S -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")'
-        else
-          echo "0.0"
-        fi
-      register: current_pyver
-      changed_when: false
-      failed_when: false
-
-    - name: Set python upgrade requirement flag
-      ansible.builtin.set_fact:
-        python_upgrade_needed: "{{ (current_pyver.stdout | trim) is version('3.9', '<') }}"
-
-    - name: Install Python 3.9 when current python is below 3.9
-      ansible.builtin.raw: |
-        apt-get update -y
-        apt-get install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev wget libbz2-dev liblzma-dev
-        wget https://www.python.org/ftp/python/3.9.18/Python-3.9.18.tgz
-        tar -xf Python-3.9.18.tgz
-        cd Python-3.9.18
-        ./configure --prefix=/usr/local/python3.9 --enable-optimizations
-        make install
-        ln -sf /usr/local/python3.9/bin/python3.9 /usr/bin/python3.9
-        ln -sf /usr/local/python3.9/bin/python3 /usr/bin/python3
-        ln -sf /usr/local/python3.9/bin/pip3 /usr/bin/pip3
-      when: python_upgrade_needed
-
 - name: Deploy Flask app on backend webservers (online mode)
   hosts: webservers
   become: true
@@ -47,16 +8,29 @@
     connectivity_test_host: google.com
     connectivity_test_port: 443
   tasks:
-
-    - name: Install Flask Through pip
-      ansible.builtin.pip:
-        name: flask
+   
+    - name: Detect package manager and collect installed packages
+      ansible.builtin.package_facts:
+        manager: apt
 
     - name: Install git
-      ansible.builtin.raw: |
-        apt-get update -y
-        apt-get install -y git
+      ansible.builtin.apt:
+        name: git
+        state: present
+        update_cache: true
+      when: "'git' not in ansible_facts.packages"
 
+    - name: Install python3
+      ansible.builtin.apt:
+        name: python3
+        state: present
+      when: "'python3' not in ansible_facts.packages"
+
+    - name: Install Flask
+      ansible.builtin.apt:
+        name: python3-flask
+        state: present
+      when: "'python3-flask' not in ansible_facts.packages"
     - name: Ensure application directory exists
       ansible.builtin.file:
         path: "{{ app_root }}"
@@ -93,27 +67,31 @@
 
           [Install]
           WantedBy=multi-user.target
-
-    - name: Reload systemd
-      ansible.builtin.systemd:
-        daemon_reload: true
-
-    - name: Enable and restart Flask service
+ 
+    - name: Start nso flask service
       ansible.builtin.systemd:
         name: nso-flask.service
         enabled: true
-        state: restarted
+        state: started
+
+    - name: Check service status
+      ansible.builtin.command: systemctl status nso-flask.service --no-pager -l
+      register: nso_status
+      changed_when: false
+      failed_when: false
+
+    - name: Show service status
+      ansible.builtin.debug:
+        var: nso_status
 
 - name: Deploy and configure HAProxy (online mode)
   hosts: HAproxy
   become: true
   vars:
-    ansible_python_interpreter: /usr/bin/python3
     connectivity_test_host: google.com
     connectivity_test_port: 443
-    haproxy_required_packages:
-      - haproxy
   tasks:
+  
     - name: Verify outbound network connectivity from HAProxy host
       ansible.builtin.wait_for:
         host: "{{ connectivity_test_host }}"
@@ -128,10 +106,16 @@
           - haproxy_connectivity_test is succeeded
         fail_msg: "HAProxy host has no outbound network connectivity; online apt installation cannot continue."
 
-    - name: Install / Reinstall HAProxy packages
-      ansible.builtin.raw: |
-        apt-get update -y
-        apt-get install -y haproxy
+    - name: Detect package manager and collect installed packages
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: Install HAProxy (if not already installed)
+      ansible.builtin.apt:
+        name: haproxy
+        state: present
+        update_cache: true
+      when: "'haproxy' not in ansible_facts.packages"
 
     - name: Configure HAProxy for webservers
       ansible.builtin.copy:
@@ -167,8 +151,8 @@
           {% for host in groups['webservers'] %}
               server {{ host }} {{ hostvars[host].ansible_default_ipv4.address | default(hostvars[host].ansible_host | default(host)) }}:5000 check
           {% endfor %}
-
-    - name: Enable and restart HAProxy
+    
+    - name: start HAProxy
       ansible.builtin.systemd:
         name: haproxy
         enabled: true
